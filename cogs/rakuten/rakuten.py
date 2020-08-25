@@ -23,6 +23,7 @@ aliases = {
     "rakuten" : "rak",
     "Rak": "rak",
     "Rakuten": "rak",
+    "yjp": "yjp"
 }
 
 x = datetime.datetime.now()
@@ -44,34 +45,6 @@ class rakuten(commands.Cog):
     async def on_ready(self):
         self.update_rak.start()
         logging.info("Bot started")
-
-    @commands.command(name='default', help='Responds with default channel')
-    async def check_default(self, ctx):
-        """
-        Responds with default channel
-
-        Parameters
-        ------------
-        """
-        if self.check_default_helper(ctx) == False:
-            await ctx.send("Please set a default channel with !set.")
-            return False
-        else:
-            await ctx.send("default channel has been set.")
-            return True
-    def check_default_helper(self, ctx):
-        default_check = self.session.prepare(
-            """
-            Select * from default_channel where guild_id = ?
-            """)
-        res = self.session.execute(default_check, [ctx.guild.id])
-        for i,item in enumerate(list(res)):
-            print(item)
-            for key, value in item.items():
-                return value
-            #return "True"
-        else:
-            return False
 
     @commands.command(name='rak', help='Responds with lastest Rakuten listing')
     async def rakuten(self, ctx, *search):
@@ -115,40 +88,61 @@ class rakuten(commands.Cog):
         query: str
             Query
         """
+        user = ctx.message.author
+        if not user:
+            # if user doesn't exist for whatever reason
+            return
+        if not user.dm_channel:
+            # if a dm channel doesn't exist with the user, create it
+            await user.create_dm()
         query = " ".join(query)
         check = self.session.prepare(
             """
-            SELECT * FROM query WHERE user=?
+            SELECT * FROM query WHERE user_id=?
             """)
-        check_res = self.session.execute(check, [ctx.message.author.mention,])
-        #print(list(check_res))
-        df = pd.DataFrame(list(check_res))
-        #print(query)
+        check_res = self.session.execute(check, [ctx.message.author.id])
+        exist_check = list(check_res)
+        #print(exist_check)
+        #print(exist_check == [])
+        if exist_check == []:
+            logging.info(
+                "{} no active queries found. Use !track to track a query.".format(ctx.message.author.mention))
+            await ctx.send(
+                "{} no active queries found. Use !track to track a query.".format(ctx.message.author.mention))
+            return
+        df = pd.DataFrame(exist_check)
         items = []
         #print(df)
         # exists_check: used to see if the query is being tracked
-        exists_check = False
         for index, row in df.iterrows():
-            #print(row)
             if row["query"] == query:
-                exists_check = True
                 new_items = rak_updater.update(query, row["last_item"], 5)
                 if not new_items:
+                    # no new items
+                    update_last.update_last(row["id"], row["last_item"], self.session)
                     continue
                 # UPDATE LAST_ITEM
                 update_last.update_last(row["id"], new_items[0]["item_url"], self.session)
                 items += new_items
-        if exists_check == False:
-            logging.info("{} {} is not being tracked. Use !track to track this query.".format(ctx.message.author.mention, query))
-            await ctx.send("{} {} is not being tracked. Use !track to track this query.".format(ctx.message.author.mention, query))
-            return
+
+
         if items == []:
             logging.info("{} no new listings for {}.".format(ctx.message.author.mention, query))
             await ctx.send("{} no new listings for {}.".format(ctx.message.author.mention, query))
             return
-        for item in items:
+        cache = {}
+        # no_post is used to send a "no new listing" message if all items are duplicates
+
+        for i, item in enumerate(items):
+            if item["item_url"] in cache:
+                continue
+            cache[item["item_url"]] = 0
             item_embed = rak_embed_maker.make(item)
-            await ctx.send(embed=item_embed)
+            await user.send(embed=item_embed)
+            no_post = False
+        logging.info("Found " + str(i+1) + " for " + query + " when force updated.")
+        await ctx.send("Found " + str(i+1) + " for " + query + " when force updated.")
+
 
     @commands.command(name="delete", help="delete a search query")
     async def delete_query(self, ctx, site: str, *query):
@@ -163,14 +157,14 @@ class rakuten(commands.Cog):
         query = " ".join(query)
         check = self.session.prepare(
             """
-            SELECT * FROM query WHERE user=?
+            SELECT * FROM query WHERE user_id=?
             """)
         if site not in aliases:
             logging.info("site code error")
             await ctx.send("site code error")
             return
         try:
-            check_res = self.session.execute(check, [ctx.message.author.mention, ])
+            check_res = self.session.execute(check, [ctx.message.author.id, ])
             df = pd.DataFrame(list(check_res))
             for i, row in df.iterrows():
                 if row["site"] == site and row["query"] == query:
@@ -184,7 +178,7 @@ class rakuten(commands.Cog):
                     await ctx.send("{} stopped tracking {} on {}.".format(ctx.message.author.mention, query, site))
                     return
         except KeyError as e:
-            # print('I got a KeyError - reason "%s"' % str(e))
+
             print("Key not found. user doesn't exist.")
 
 
@@ -202,14 +196,14 @@ class rakuten(commands.Cog):
         query = " ".join(query)
         check = self.session.prepare(
         """
-        SELECT * FROM query WHERE user=?
+        SELECT * FROM query WHERE user_id=?
         """)
         if site not in aliases:
             logging.info("site code error")
             await ctx.send("site code error")
             return
         try:
-            check_res = self.session.execute(check, [ctx.message.author.mention,])
+            check_res = self.session.execute(check, [ctx.message.author.id,])
             df = pd.DataFrame(list(check_res))
             for i, row in df.iterrows():
                 if row["site"] == site and row["query"] == query:
@@ -240,9 +234,8 @@ class rakuten(commands.Cog):
     async def update_rak(self):
         #check time to see if it should run
         x = datetime.datetime.now()
-        #print(x.year)
         minute = x.strftime("%M")
-        if int(minute) % 15 != 0:
+        if int(minute) % 30 != 0:
             return
         else:
             logging.info("15 minute update")
@@ -254,13 +247,13 @@ class rakuten(commands.Cog):
         check_res = self.session.execute(check)
         queries = pd.DataFrame(list(check_res))
         # loop through queries
+        cache = {}
         for index, row in queries.iterrows():
             #get the user that is tracking the query
             user = self.client.get_user(row["user_id"])
             if not user:
                 # if user doesn't exist for whatever reason
                 return
-            #print(user.dm_channel)
             if not user.dm_channel:
                 # if a dm channel doesn't exist with the user, create it
                 await user.create_dm()
@@ -268,14 +261,32 @@ class rakuten(commands.Cog):
             items = rak_updater.update(row["query"], row["last_item"], 1)
             if not items:
                 # no new items
-                logging.info("no new listings for {}.".format(row["query"]))
+                update_last.update_last(row["id"], row["last_item"], self.session)
+                logging.info("No new items for {} on {}.".format(row["query"], row["site"]))
+                await user.send("No new items for {} on {}.".format(row["query"], row["site"]))
                 continue
             # update last_item
             update_last.update_last(row["id"], items[0]["item_url"], self.session)
-            for item in items:
+            # no_post is used to send a "no new listing" message if all items are duplicates
+            no_post = True
+            for i, item in enumerate(items):
+                if item["item_url"] in cache:
+                    # check to see if item has already been posted
+                    continue
+                cache[item["item_url"]] = 0
+                no_post = False
                 # loop through all items and create cards
                 item_embed = rak_embed_maker.make(item)
+                logging.info("{} found {} in {} on {}.".format(user.name, item["item_url"], row["query"], row["site"]))
                 await user.send(embed=item_embed)
+            if no_post == True:
+                logging.info(
+                    "No new listings for {} on {} (All duplicates).".format(row["query"], row["site"]))
+                await user.send(
+                    "No new listings for {} on {} (All duplicates).".format(row["query"], row["site"]))
+            else:
+                logging.info("Found " + str(i+1) + " for " + row["query"]+".")
+                await user.send("Found " + str(i+1) + " for " + row["query"]+".")
 
 def setup(client):
     client.add_cog(rakuten(client))
